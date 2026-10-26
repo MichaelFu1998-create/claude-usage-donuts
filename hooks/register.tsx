@@ -1,11 +1,11 @@
-import type { Register, SessionContextUsage, SessionRateLimit } from 'claude-code'
+import type { Register, SessionRateLimit } from 'claude-code'
 
 import type { Gauge, Gauges } from '../types'
 
 const EMPTY: Gauge = { percent: null }
 
 // Kept in the module: session.start re-reads usage after a hot reload.
-let now: Gauges = { context: EMPTY, session: EMPTY, weekly: EMPTY, weeklyFable: EMPTY }
+let now: Gauges = { session: EMPTY, weekly: EMPTY, weeklyFable: EMPTY }
 // Hidden and shown again with /usage-donuts.
 let isClosed = false
 
@@ -13,10 +13,9 @@ const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 
-// Each gauge, and the window its countdown donut runs over; context and
-// Weekly Fable show usage alone.
+// Each gauge, and the window its countdown donut runs over; Weekly Fable shows
+// usage alone.
 const GAUGES: { id: keyof Gauges; label: string; windowMs?: number }[] = [
-  { id: 'context', label: 'Context' },
   { id: 'session', label: '5-hour session', windowMs: 5 * HOUR },
   { id: 'weekly', label: 'Weekly', windowMs: 7 * DAY },
   { id: 'weeklyFable', label: 'Weekly Fable' },
@@ -28,14 +27,13 @@ function isFableWeekly(kind: string) {
   return /fable/i.test(kind) || (/seven_day|weekly/i.test(kind) && kind !== 'seven_day')
 }
 
-function toGauges(context: SessionContextUsage, limits: readonly SessionRateLimit[]): Gauges {
+function toGauges(limits: readonly SessionRateLimit[]): Gauges {
   const pick = (match: (kind: string) => boolean): Gauge => {
     const limit = limits.find(l => match(l.kind))
     return limit ? { percent: limit.percentUsed, resetsAt: limit.resetsAt } : EMPTY
   }
 
   return {
-    context: { percent: context.percent ?? null },
     session: pick(kind => kind === 'five_hour'),
     weekly: pick(kind => kind === 'seven_day'),
     weeklyFable: pick(isFableWeekly),
@@ -55,10 +53,19 @@ function msLeft(gauge: Gauge, nowMs: number) {
   return Number.isFinite(ms) && ms > 0 ? ms : null
 }
 
-// Minutes inside the 5-hour window; days for a weekly one, hours on its last day.
-function formatLeft(ms: number, windowMs: number) {
-  if (windowMs <= 5 * HOUR) return `${Math.ceil(ms / MINUTE)}m`
-  return ms < DAY ? `${Math.ceil(ms / HOUR)}h` : `${Math.ceil(ms / DAY)}d`
+// Hours and minutes inside the 5-hour window; days and hours for a weekly one.
+// `isCompact` is the form the countdown donut's centre has room for.
+function formatLeft(ms: number, windowMs: number, isCompact = false) {
+  if (windowMs <= 5 * HOUR) {
+    const total = Math.ceil(ms / MINUTE)
+    const [h, m] = [Math.floor(total / 60), total % 60]
+    if (isCompact) return h > 0 ? `${h}:${String(m).padStart(2, '0')}` : `${m}m`
+    return h > 0 ? `${h}h ${m}m` : `${m}m`
+  }
+  const total = Math.ceil(ms / HOUR)
+  const [d, h] = [Math.floor(total / 24), total % 24]
+  if (d === 0) return `${h}h`
+  return isCompact ? `${d}d${h}h` : `${d}d ${h}h`
 }
 
 function percentText(gauge: Gauge) {
@@ -82,14 +89,12 @@ function ring(cx: number, fraction: number | null, color: string, centre: string
 function cardSvg(g: (typeof GAUGES)[number], gauge: Gauge, nowMs: number) {
   const usage = ring(20, gauge.percent === null ? null : gauge.percent / 100, gauge.percent === null ? '#999' : colorFor(gauge.percent), percentText(gauge))
   const left = g.windowMs ? msLeft(gauge, nowMs) : null
-  const countdown = g.windowMs ? ring(54, left === null ? null : left / g.windowMs, '#4a90d9', left === null ? '—' : formatLeft(left, g.windowMs)) : ''
+  const countdown = g.windowMs ? ring(54, left === null ? null : left / g.windowMs, '#4a90d9', left === null ? '—' : formatLeft(left, g.windowMs, true)) : ''
   const textX = g.windowMs ? 76 : 42
   const detail =
     gauge.percent === null
       ? 'no reading yet'
-      : g.id === 'context'
-        ? `${percentText(gauge)} of the window`
-        : `${percentText(gauge)} used${left === null || !g.windowMs ? '' : ` · resets in ${formatLeft(left, g.windowMs)}`}`
+      : `${percentText(gauge)} used${left === null || !g.windowMs ? '' : ` · resets in ${formatLeft(left, g.windowMs)}`}`
   const width = textX + Math.max(g.label.length * 6.6, detail.length * 5.4) + 6
 
   return {
@@ -118,7 +123,7 @@ export const register: Register = on => {
     const result = await next(e)
     await $.command.register({ name: 'usage-donuts', description: 'Show or hide the usage donuts above the prompt' })
     const usage = await $.session.usage()
-    now = toGauges(usage.context, usage.rateLimits)
+    now = toGauges(usage.rateLimits)
     $.ui.invalidate('ui.render')
     // Redraw each minute so the countdowns move between replies.
     $.clock.every(MINUTE, () => $.ui.invalidate('ui.render'))
@@ -126,7 +131,7 @@ export const register: Register = on => {
   })
 
   on('session.measure', async ($, e, next) => {
-    now = toGauges(e.context, e.rateLimits)
+    now = toGauges(e.rateLimits)
     $.ui.invalidate('ui.render')
     return next(e)
   })
