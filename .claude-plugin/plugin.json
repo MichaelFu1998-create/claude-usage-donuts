@@ -1,1 +1,1 @@
-{ "name": "usage-donuts", "version": "0.1.0", "description": "Four usage donuts above the chat input: context, session (5h), weekly, and weekly Fable limits" }
+{ "name": "usage-donuts", "version": "0.2.0", "description": "Four usage donuts above the chat input: context, session (5h), weekly, and weekly Fable limits" }

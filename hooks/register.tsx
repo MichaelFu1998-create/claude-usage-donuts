@@ -6,12 +6,20 @@ const EMPTY: Gauge = { percent: null }
 
 // Kept in the module: session.start re-reads usage after a hot reload.
 let now: Gauges = { context: EMPTY, session: EMPTY, weekly: EMPTY, weeklyFable: EMPTY }
+// Hidden and shown again with /usage-donuts.
+let isClosed = false
 
-const DONUTS: { id: keyof Gauges; label: string }[] = [
+const MINUTE = 60_000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+
+// Each gauge, and the window its countdown donut runs over; context and
+// Weekly Fable show usage alone.
+const GAUGES: { id: keyof Gauges; label: string; windowMs?: number }[] = [
   { id: 'context', label: 'Context' },
-  { id: 'session', label: 'Session' },
-  { id: 'weekly', label: 'Weekly' },
-  { id: 'weeklyFable', label: 'Fable wk' },
+  { id: 'session', label: '5-hour session', windowMs: 5 * HOUR },
+  { id: 'weekly', label: 'Weekly', windowMs: 7 * DAY },
+  { id: 'weeklyFable', label: 'Weekly Fable' },
 ]
 
 // The engine names windows `five_hour`, `seven_day` and `spend_limit`; a
@@ -41,38 +49,79 @@ function colorFor(percent: number) {
   return '#3fa66b'
 }
 
-function donutSvg(label: string, gauge: Gauge) {
-  const r = 16
-  const c = 2 * Math.PI * r
-  const p = gauge.percent === null ? 0 : Math.min(100, Math.max(0, gauge.percent))
-  const dash = (p / 100) * c
-  const value = gauge.percent === null ? '—' : `${Math.round(gauge.percent)}%`
-  const arc =
-    gauge.percent === null
-      ? ''
-      : `<circle cx="22" cy="22" r="${r}" fill="none" stroke="${colorFor(p)}" stroke-width="5" stroke-linecap="round" stroke-dasharray="${dash} ${c}" transform="rotate(-90 22 22)"/>`
-
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="56" height="62" viewBox="-6 0 56 62">
-<style>.t{fill:#555;font:600 10px -apple-system,system-ui,sans-serif}.l{fill:#888;font:9px -apple-system,system-ui,sans-serif}.k{stroke:#ddd}
-@media (prefers-color-scheme: dark){.t{fill:#ddd}.l{fill:#999}.k{stroke:#444}}</style>
-<circle class="k" cx="22" cy="22" r="${r}" fill="none" stroke-width="5"/>${arc}
-<text class="t" x="22" y="25.5" text-anchor="middle">${value}</text>
-<text class="l" x="22" y="56" text-anchor="middle">${label}</text>
-</svg>`
+function msLeft(gauge: Gauge, nowMs: number) {
+  if (!gauge.resetsAt) return null
+  const ms = Date.parse(gauge.resetsAt) - nowMs
+  return Number.isFinite(ms) && ms > 0 ? ms : null
 }
 
-function describe(label: string, gauge: Gauge) {
-  if (gauge.percent === null) return `${label}: no reading`
-  const resets = gauge.resetsAt ? `, resets ${new Date(gauge.resetsAt).toLocaleString()}` : ''
-  return `${label}: ${gauge.percent}% used${resets}`
+// Minutes inside the 5-hour window; days for a weekly one, hours on its last day.
+function formatLeft(ms: number, windowMs: number) {
+  if (windowMs <= 5 * HOUR) return `${Math.ceil(ms / MINUTE)}m`
+  return ms < DAY ? `${Math.ceil(ms / HOUR)}h` : `${Math.ceil(ms / DAY)}d`
+}
+
+function percentText(gauge: Gauge) {
+  return gauge.percent === null ? '—' : `${Math.round(gauge.percent)}%`
+}
+
+const H = 40
+const R = 13
+const C = 2 * Math.PI * R
+
+function ring(cx: number, fraction: number | null, color: string, centre: string) {
+  const arc =
+    fraction === null
+      ? ''
+      : `<circle cx="${cx}" cy="20" r="${R}" fill="none" stroke="${color}" stroke-width="4" stroke-linecap="round" stroke-dasharray="${Math.max(0, Math.min(1, fraction)) * C} ${C}" transform="rotate(-90 ${cx} 20)"/>`
+  return `<circle class="k" cx="${cx}" cy="20" r="${R}" fill="none" stroke-width="4"/>${arc}<text class="c" x="${cx}" y="23" text-anchor="middle"${centre.length > 3 ? ' style="font-size:6.5px"' : ''}>${centre}</text>`
+}
+
+// One card, 40px high: the usage donut, the countdown donut when the window
+// resets, and the name with a line of detail beside them.
+function cardSvg(g: (typeof GAUGES)[number], gauge: Gauge, nowMs: number) {
+  const usage = ring(20, gauge.percent === null ? null : gauge.percent / 100, gauge.percent === null ? '#999' : colorFor(gauge.percent), percentText(gauge))
+  const left = g.windowMs ? msLeft(gauge, nowMs) : null
+  const countdown = g.windowMs ? ring(54, left === null ? null : left / g.windowMs, '#4a90d9', left === null ? '—' : formatLeft(left, g.windowMs)) : ''
+  const textX = g.windowMs ? 76 : 42
+  const detail =
+    gauge.percent === null
+      ? 'no reading yet'
+      : g.id === 'context'
+        ? `${percentText(gauge)} of the window`
+        : `${percentText(gauge)} used${left === null || !g.windowMs ? '' : ` · resets in ${formatLeft(left, g.windowMs)}`}`
+  const width = textX + Math.max(g.label.length * 6.6, detail.length * 5.4) + 6
+
+  return {
+    width: Math.ceil(width),
+    source: `<svg xmlns="http://www.w3.org/2000/svg" width="${Math.ceil(width)}" height="${H}" viewBox="0 0 ${Math.ceil(width)} ${H}">
+<style>.c{fill:#555;font:600 8px -apple-system,system-ui,sans-serif}.n{fill:#333;font:600 11px -apple-system,system-ui,sans-serif}.d{fill:#888;font:10px -apple-system,system-ui,sans-serif}.k{stroke:#e2e2e2}
+@media (prefers-color-scheme: dark){.c{fill:#ddd}.n{fill:#eee}.d{fill:#999}.k{stroke:#444}}</style>
+${usage}${countdown}
+<text class="n" x="${textX}" y="17">${g.label}</text>
+<text class="d" x="${textX}" y="30">${detail}</text>
+</svg>`,
+    alt: `${g.label}: ${detail}`,
+  }
+}
+
+function textLine(nowMs: number) {
+  return GAUGES.map(g => {
+    const gauge = now[g.id]
+    const left = g.windowMs ? msLeft(gauge, nowMs) : null
+    return `${g.label} ${percentText(gauge)}${left === null || !g.windowMs ? '' : ` (${formatLeft(left, g.windowMs)})`}`
+  }).join('  ·  ')
 }
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const result = await next(e)
+    await $.command.register({ name: 'usage-donuts', description: 'Show or hide the usage donuts above the prompt' })
     const usage = await $.session.usage()
     now = toGauges(usage.context, usage.rateLimits)
     $.ui.invalidate('ui.render')
+    // Redraw each minute so the countdowns move between replies.
+    $.clock.every(MINUTE, () => $.ui.invalidate('ui.render'))
     return result
   })
 
@@ -82,26 +131,37 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // The dim hint line under the prompt: the engine's hint on the left, the
-  // donuts on the right; the terminal keeps its line and gets the figures as a tail.
-  on('ui.render', { component: 'PromptHint' }, ($, e, next) => {
+  on('command.run', { command: 'usage-donuts' }, async $ => {
+    isClosed = !isClosed
+    $.ui.invalidate('ui.render')
+    return { text: isClosed ? 'Usage donuts hidden.' : 'Usage donuts shown.' }
+  })
+
+  // The band directly above the prompt: room for the full names, and the one
+  // site under the transcript where the desktop draws a mod's Svg.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey || isClosed) return next(e)
+
+    const nowMs = await $.clock.now()
     const ui = $.ui.resolve(e)
 
     if (e.surface === 'desktop' && 'Svg' in ui) {
-      const { Box, Svg, Text } = ui
+      const { Box, Svg } = ui
       return (
-        <Box flexDirection="row" justifyContent="space-between" alignItems="center">
-          <Text dimColor>{e.props.hint}</Text>
-          <Box flexDirection="row" gap={1}>
-            {DONUTS.map(d => (
-              <Svg source={donutSvg(d.label, now[d.id])} alt={describe(d.label, now[d.id])} width={56} height={62} />
-            ))}
-          </Box>
+        <Box flexDirection="row" flexWrap="wrap" justifyContent="flex-end" gap={2}>
+          {GAUGES.map(g => {
+            const card = cardSvg(g, now[g.id], nowMs)
+            return <Svg source={card.source} alt={card.alt} width={card.width} height={H} />
+          })}
         </Box>
       )
     }
 
-    const tail = DONUTS.map(d => `${d.label} ${now[d.id].percent === null ? '—' : `${Math.round(now[d.id].percent!)}%`}`).join(' · ')
-    return next({ ...e, props: { ...e.props, tail } })
+    const { Box, Text } = ui
+    return (
+      <Box flexDirection="row" justifyContent="flex-end">
+        <Text dimColor>{textLine(nowMs)}</Text>
+      </Box>
+    )
   })
 }
